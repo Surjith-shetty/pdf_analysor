@@ -32,7 +32,19 @@ from utils.notifier import notify_result, notify
 console = Console()
 
 ORCHESTRATOR = "http://localhost:8000"
-WATCH_FOLDER = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else str(Path.home() / "Downloads")
+SYSTEM_WATCH_FOLDERS = [
+    str(Path.home() / "Downloads"),
+    str(Path.home() / "Desktop"),
+    str(Path.home() / "Documents"),
+    str(Path.home() / "Library" / "Mail Downloads"),
+    "/tmp",
+    "/var/tmp",
+]
+
+if len(sys.argv) > 1 and not sys.argv[1].startswith("--"):
+    WATCH_FOLDERS = [sys.argv[1]]
+else:
+    WATCH_FOLDERS = [f for f in SYSTEM_WATCH_FOLDERS if os.path.exists(f)]
 START_SERVERS = "--start-servers" in sys.argv
 
 # Debounce: avoid re-analyzing the same file within 10 seconds
@@ -177,7 +189,7 @@ def wait_for_orchestrator(retries: int = 10, delay: float = 2.0) -> bool:
 if __name__ == "__main__":
     console.print(Panel(
         "[bold]PDF Attack Chain Watcher[/bold]\n"
-        f"Monitoring: [cyan]{WATCH_FOLDER}[/cyan]",
+        + "\n".join(f"Monitoring: [cyan]{f}[/cyan]" for f in WATCH_FOLDERS),
         border_style="cyan",
     ))
 
@@ -191,13 +203,16 @@ if __name__ == "__main__":
         sys.exit(1)
 
     console.print(f"[green]✓ Orchestrator ready[/green]")
-    console.print(f"[green]✓ Watching {WATCH_FOLDER} for PDFs...[/green]")
+    for f in WATCH_FOLDERS:
+        console.print(f"[green]✓ Watching {f}[/green]")
     console.print("[dim]Press Ctrl+C to stop[/dim]\n")
 
-    notify("PDF Watcher Active", f"Monitoring {WATCH_FOLDER}", "Any PDF opened will be analyzed")
+    notify("PDF Watcher Active", f"Monitoring {len(WATCH_FOLDERS)} folders", "Any PDF opened will be analyzed")
 
     observer = Observer()
-    observer.schedule(PDFHandler(), WATCH_FOLDER, recursive=True)
+    handler = PDFHandler()
+    for folder in WATCH_FOLDERS:
+        observer.schedule(handler, folder, recursive=True)
     observer.start()
 
     try:
