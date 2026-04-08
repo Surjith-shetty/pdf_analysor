@@ -2,19 +2,18 @@
 mcp_servers/response_server/server.py
 
 MCP Server 7: Response Action Executor
-Role: Executes (or simulates) response actions decided by the orchestrator.
-      In simulate mode: logs what WOULD happen.
-      In enforce mode: calls real OS/EDR APIs.
-
 Supported actions:
-  - log_only          → just record the case
-  - alert_analyst     → send notification (mock: print/log)
+  - log_only          → record the case
+  - alert_analyst     → send notification
   - kill_process      → terminate a PID
-  - quarantine_file   → move file to quarantine dir
-  - isolate_host      → block network (mock: log firewall rule)
+  - quarantine_file   → move to quarantine + strip execute bits
+  - delete_file       → permanently delete the file
+  - isolate_host      → block network (simulate or EDR)
 """
 import os
 import shutil
+import stat
+import signal
 from datetime import datetime
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -25,10 +24,9 @@ from utils.logger import get_logger
 log = get_logger("response_server")
 app = FastAPI(title="Response Action MCP Server")
 
-QUARANTINE_DIR = "/tmp/cyber_quarantine"
+QUARANTINE_DIR = os.path.expanduser("~/cyber_quarantine")
 os.makedirs(QUARANTINE_DIR, exist_ok=True)
 
-# Audit log of all actions taken this session
 _action_log: list[ResponseAction] = []
 
 
@@ -43,7 +41,7 @@ def _kill_process(pid: int, simulated: bool) -> str:
     if simulated:
         return f"[SIMULATED] Would kill PID {pid}"
     try:
-        os.kill(pid, 9)
+        os.kill(pid, signal.SIGKILL)
         return f"Killed PID {pid}"
     except Exception as e:
         return f"Failed to kill PID {pid}: {e}"
@@ -54,21 +52,38 @@ def _quarantine_file(path: str, simulated: bool) -> str:
         return f"[SIMULATED] Would quarantine {path}"
     try:
         dest = os.path.join(QUARANTINE_DIR, os.path.basename(path))
+        if os.path.exists(dest):
+            base, ext = os.path.splitext(os.path.basename(path))
+            dest = os.path.join(QUARANTINE_DIR, f"{base}_{int(datetime.utcnow().timestamp())}{ext}")
         shutil.move(path, dest)
-        return f"Quarantined {path} -> {dest}"
+        os.chmod(dest, stat.S_IRUSR | stat.S_IWUSR)  # strip execute bits
+        return f"Quarantined {path} → {dest}"
     except Exception as e:
         return f"Failed to quarantine {path}: {e}"
+
+
+def _delete_file(path: str, simulated: bool) -> str:
+    if simulated:
+        return f"[SIMULATED] Would permanently delete {path}"
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+        elif os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            return f"Path not found: {path}"
+        return f"Permanently deleted {path}"
+    except Exception as e:
+        return f"Failed to delete {path}: {e}"
 
 
 def _isolate_host(host: str, simulated: bool) -> str:
     if simulated:
         return f"[SIMULATED] Would isolate host {host} (block all outbound)"
-    # In production: call EDR API or push firewall rule
     return f"[ENFORCE] Host isolation for {host} — integrate with EDR API"
 
 
 def _alert_analyst(case_id: str, reason: str) -> str:
-    # In production: send to SIEM, PagerDuty, Slack webhook, etc.
     log.warning(f"🚨 ANALYST ALERT | Case: {case_id} | {reason}")
     return f"Alert sent for case {case_id}"
 
@@ -96,6 +111,10 @@ async def execute_action(req: ActionRequest) -> ResponseAction:
     elif req.action == "quarantine_file":
         result = _quarantine_file(req.target, simulated)
         log.warning(f"[QUARANTINE] {result}")
+
+    elif req.action == "delete_file":
+        result = _delete_file(req.target, simulated)
+        log.warning(f"[DELETE_FILE] {result}")
 
     elif req.action == "isolate_host":
         result = _isolate_host(req.target, simulated)
