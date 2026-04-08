@@ -1,0 +1,79 @@
+{
+  "_comment": "Mock attack scenario: Malicious invoice PDF from external email triggers full attack chain",
+  "scenario": "invoice_phishing_with_powershell_dropper",
+
+  "trigger": {
+    "pdf_path": "/tmp/invoice_q2.pdf",
+    "pdf_hash": "deadbeef1234",
+    "user": "jdoe",
+    "host": "WORKSTATION-01",
+    "origin": "external_email"
+  },
+
+  "process_events": [
+    {
+      "pid": 1234, "name": "AcroRd32.exe",
+      "cmdline": "AcroRd32.exe /tmp/invoice_q2.pdf",
+      "parent_pid": 999, "parent_name": "explorer.exe",
+      "user": "jdoe", "host": "WORKSTATION-01",
+      "timestamp": "2024-06-01T09:16:00", "event_type": "create"
+    },
+    {
+      "pid": 1235, "name": "powershell.exe",
+      "cmdline": "powershell -enc JABjAD0ATgBlAHcALQBPAGIAagBlAGMAdA==",
+      "parent_pid": 1234, "parent_name": "AcroRd32.exe",
+      "user": "jdoe", "host": "WORKSTATION-01",
+      "timestamp": "2024-06-01T09:16:05", "event_type": "create"
+    },
+    {
+      "pid": 1236, "name": "cmd.exe",
+      "cmdline": "cmd.exe /c copy C:\\Windows\\Temp\\temp.exe %APPDATA%\\svchost.exe",
+      "parent_pid": 1235, "parent_name": "powershell.exe",
+      "user": "jdoe", "host": "WORKSTATION-01",
+      "timestamp": "2024-06-01T09:16:10", "event_type": "create"
+    }
+  ],
+
+  "file_events": [
+    {
+      "path": "C:\\Users\\jdoe\\AppData\\Local\\Temp\\temp.exe",
+      "operation": "create",
+      "process_name": "powershell.exe", "process_pid": 1235,
+      "user": "jdoe", "host": "WORKSTATION-01",
+      "timestamp": "2024-06-01T09:16:08",
+      "file_hash": "cafebabe1234"
+    },
+    {
+      "path": "C:\\Users\\jdoe\\AppData\\Local\\Temp\\temp.exe",
+      "operation": "execute",
+      "process_name": "cmd.exe", "process_pid": 1236,
+      "user": "jdoe", "host": "WORKSTATION-01",
+      "timestamp": "2024-06-01T09:16:12",
+      "file_hash": "cafebabe1234"
+    }
+  ],
+
+  "network_events": [
+    {
+      "src_ip": "192.168.1.50", "dst_ip": "185.220.101.45", "dst_port": 4444,
+      "protocol": "TCP", "process_name": "temp.exe", "process_pid": 1237,
+      "user": "jdoe", "host": "WORKSTATION-01",
+      "timestamp": "2024-06-01T09:16:15",
+      "bytes_sent": 1024, "dns_query": null
+    },
+    {
+      "src_ip": "192.168.1.50", "dst_ip": "185.220.101.45", "dst_port": 443,
+      "protocol": "TCP", "process_name": "temp.exe", "process_pid": 1237,
+      "user": "jdoe", "host": "WORKSTATION-01",
+      "timestamp": "2024-06-01T09:16:20",
+      "bytes_sent": 512, "dns_query": "c2.evil-domain.ru"
+    }
+  ],
+
+  "expected_outcome": {
+    "risk_level": "critical",
+    "classification": "malicious",
+    "recommended_action": "isolate_host",
+    "attack_stage": "execution_and_c2"
+  }
+}
