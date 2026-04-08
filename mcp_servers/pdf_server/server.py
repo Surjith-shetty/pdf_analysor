@@ -76,11 +76,14 @@ def _analyze_with_pymupdf(path: str) -> dict:
 
         result["entropy"] = calculate_entropy(raw)
 
-        # Keyword scan on raw bytes
+        # Keyword scan on raw bytes — skip neutralised tokens (e.g. /JS_removed)
+        import re
         raw_str = raw.decode("latin-1", errors="ignore")
         found_keywords = []
         for kw in SUSPICIOUS_KEYWORDS:
-            if kw.lower() in raw_str.lower():
+            # Match keyword only when NOT followed by '_removed'
+            pattern = re.escape(kw) + r'(?!_removed)'
+            if re.search(pattern, raw_str, re.IGNORECASE):
                 found_keywords.append(kw)
 
         result["suspicious_keywords"] = found_keywords

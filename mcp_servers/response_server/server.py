@@ -28,6 +28,21 @@ QUARANTINE_DIR = os.path.expanduser("~/cyber_quarantine")
 os.makedirs(QUARANTINE_DIR, exist_ok=True)
 
 _action_log: list[ResponseAction] = []
+_sanitized_hashes: set[str] = set()
+
+
+@app.post("/sanitized/register")
+async def register_sanitized(payload: dict):
+    """Register a file hash as sanitized so future scans skip flagging it."""
+    h = payload.get("hash", "")
+    if h:
+        _sanitized_hashes.add(h)
+    return {"registered": h}
+
+
+@app.get("/sanitized/check")
+async def check_sanitized(hash: str):
+    return {"sanitized": hash in _sanitized_hashes}
 
 
 class ActionRequest(BaseModel):

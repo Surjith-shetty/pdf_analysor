@@ -14,6 +14,7 @@ RISK_EMOJI = {
 ACTION_EMOJI = {
     "deleted": "🗑️",
     "quarantined": "🔒",
+    "sanitized": "✨",
     "kept by user": "⚠️",
 }
 

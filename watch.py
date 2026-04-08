@@ -30,9 +30,29 @@ from utils.notifier import notify, notify_result, notify_threat_action
 
 console = Console()
 
+RESPONSE_SERVER = f"http://localhost:8007"
+
+
+def _is_sanitized(pdf_hash: str) -> bool:
+    """Check with response server if this hash was already sanitized."""
+    try:
+        r = httpx.get(f"{RESPONSE_SERVER}/sanitized/check", params={"hash": pdf_hash}, timeout=3.0)
+        return r.json().get("sanitized", False)
+    except Exception:
+        return False
+
+
+def _register_sanitized(pdf_hash: str):
+    try:
+        httpx.post(f"{RESPONSE_SERVER}/sanitized/register", json={"hash": pdf_hash}, timeout=3.0)
+    except Exception:
+        pass
+
 ORCHESTRATOR = "http://localhost:8000"
 QUARANTINE_DIR = os.path.expanduser("~/cyber_quarantine")
+SANITIZED_DIR = os.path.expanduser("~/Desktop/cyber_sanitized")
 os.makedirs(QUARANTINE_DIR, exist_ok=True)
+os.makedirs(SANITIZED_DIR, exist_ok=True)
 
 PDF_READER_NAMES = {"preview", "acrobat", "acrord32", "adobe acrobat", "foxit", "skim", "pdf viewer"}
 
@@ -171,6 +191,122 @@ def _delete_file(path: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+def _sanitize_pdf(quarantined_path: str) -> tuple[bool, str]:
+    """
+    Sanitize a quarantined PDF by rebuilding it without malicious elements:
+      - Strips all JavaScript (/JS, /JavaScript)
+      - Removes OpenAction / AA (auto-launch) entries
+      - Removes embedded files (/EmbeddedFile)
+      - Removes Launch actions
+      - Saves clean copy to SANITIZED_DIR
+    Uses PyMuPDF (fitz) for surgical stream-level removal.
+    Falls back to raw byte scrubbing if fitz unavailable.
+    """
+    base_name = os.path.basename(quarantined_path)
+    dest = os.path.join(SANITIZED_DIR, f"sanitized_{base_name}")
+    if os.path.exists(dest):
+        name, ext = os.path.splitext(base_name)
+        dest = os.path.join(SANITIZED_DIR, f"sanitized_{name}_{int(time.time())}{ext}")
+
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(quarantined_path)
+        removed = []
+
+        for xref in range(1, doc.xref_length()):
+            try:
+                obj = doc.xref_object(xref, compressed=False)
+                modified = obj
+
+                # Strip JavaScript
+                if "/JS" in obj or "/JavaScript" in obj:
+                    modified = modified.replace("/JS", "/JS_removed")
+                    modified = modified.replace("/JavaScript", "/JavaScript_removed")
+                    removed.append("JavaScript")
+
+                # Strip OpenAction / AA
+                if "/OpenAction" in obj or "/AA " in obj:
+                    modified = modified.replace("/OpenAction", "/OpenAction_removed")
+                    modified = modified.replace("/AA ", "/AA_removed ")
+                    removed.append("OpenAction")
+
+                # Strip Launch actions
+                if "/Launch" in obj:
+                    modified = modified.replace("/Launch", "/Launch_removed")
+                    removed.append("Launch")
+
+                # Strip EmbeddedFile
+                if "/EmbeddedFile" in obj:
+                    modified = modified.replace("/EmbeddedFile", "/EmbeddedFile_removed")
+                    removed.append("EmbeddedFile")
+
+                if modified != obj:
+                    doc.update_object(xref, modified)
+
+            except Exception:
+                continue
+
+        doc.save(dest, garbage=4, deflate=True, clean=True)
+        doc.close()
+
+        # Make sanitized file read-only (safe to open)
+        os.chmod(dest, stat.S_IRUSR | stat.S_IRGRP)
+        removed_unique = list(set(removed))
+        return True, dest, removed_unique
+
+    except ImportError:
+        # Fallback: raw byte scrubbing
+        MALICIOUS_TOKENS = [
+            b"/JS ", b"/JavaScript", b"/OpenAction", b"/AA ",
+            b"/Launch", b"/EmbeddedFile", b"eval(", b"unescape(",
+        ]
+        with open(quarantined_path, "rb") as f:
+            data = f.read()
+        removed = []
+        for token in MALICIOUS_TOKENS:
+            if token in data:
+                data = data.replace(token, b"/removed_" + token[1:])
+                removed.append(token.decode("latin-1").strip())
+        with open(dest, "wb") as f:
+            f.write(data)
+        os.chmod(dest, stat.S_IRUSR | stat.S_IRGRP)
+        return True, dest, list(set(removed))
+
+    except Exception as e:
+        return False, str(e), []
+
+
+def _ask_sanitize_dialog(pdf_name: str, quarantine_path: str) -> bool:
+    """Ask user if they want to sanitize the quarantined file. Returns True = sanitize."""
+    safe_name = pdf_name.replace('"', "'")
+    safe_path = quarantine_path.replace('"', "'")
+    script = (
+        f'display dialog '
+        f'"🔒 File Quarantined Successfully\\n\\n'
+        f'File: {safe_name}\\n'
+        f'Location: {safe_path}\\n\\n'
+        f'Would you like to sanitize this file?\\n'
+        f'Sanitization removes all malicious elements (JavaScript,\\n'
+        f'OpenAction, embedded files) and saves a clean copy to:\\n'
+        f'{SANITIZED_DIR}/" '
+        f'with title "Sanitize Quarantined File?" '
+        f'with icon caution '
+        f'buttons {{"Skip", "Sanitize"}} '
+        f'default button "Sanitize" '
+        f'cancel button "Skip"'
+    )
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=120
+        )
+        return "Sanitize" in r.stdout
+    except subprocess.TimeoutExpired:
+        return False
+    except Exception:
+        return False
+
+
 # ── User dialog ───────────────────────────────────────────────────────────────
 
 def _build_attack_summary(result: dict) -> str:
@@ -247,6 +383,11 @@ async def _analyze(pdf_path: str):
         console.print(f"[red]Could not hash {pdf_name}: {e}[/red]")
         return
 
+    # Skip files that were already sanitized by this system
+    if _is_sanitized(pdf_hash):
+        console.print(f"[green]✓ {pdf_name} was previously sanitized — skipping.[/green]")
+        return
+
     console.print(f"\n[bold cyan]PDF detected:[/bold cyan] {pdf_name}")
     console.print(f"  SHA256: [dim]{pdf_hash[:16]}...[/dim]")
 
@@ -320,7 +461,33 @@ async def _analyze(pdf_path: str):
         ok, msg = _quarantine_file(pdf_path)
         if ok:
             console.print(f"  [green]✓ Quarantined → {msg}[/green]")
-            notify_threat_action(pdf_name, "quarantined", f"Moved to ~/cyber_quarantine")
+            notify_threat_action(pdf_name, "quarantined", "Moved to ~/cyber_quarantine")
+
+            # ── Sanitization offer ────────────────────────────────────────────
+            console.print("  [bold]Asking user about sanitization...[/bold]")
+            want_sanitize = _ask_sanitize_dialog(pdf_name, msg)
+            if want_sanitize:
+                s_ok, s_dest, removed = _sanitize_pdf(msg)
+                if s_ok:
+                    removed_str = ", ".join(removed) if removed else "none found"
+                    console.print(f"  [green]✓ Sanitized → {s_dest}[/green]")
+                    console.print(f"  [dim]  Removed: {removed_str}[/dim]")
+                    # Register sanitized file hash so re-opens are not re-flagged
+                    try:
+                        sanitized_hash = _sha256(s_dest)
+                        _register_sanitized(sanitized_hash)
+                    except Exception:
+                        pass
+                    notify_threat_action(
+                        pdf_name, "sanitized",
+                        f"Clean copy saved to ~/Desktop/cyber_sanitized | Removed: {removed_str}"
+                    )
+                else:
+                    console.print(f"  [red]Sanitization failed: {s_dest}[/red]")
+                    notify("Sanitization Failed", pdf_name, s_dest)
+            else:
+                console.print("  [yellow]User skipped sanitization. File remains quarantined.[/yellow]")
+                notify_threat_action(pdf_name, "quarantined", "Sanitization skipped by user")
         else:
             console.print(f"  [red]Quarantine failed: {msg}[/red]")
             notify("Quarantine Failed", pdf_name, msg)
@@ -349,6 +516,9 @@ class PDFHandler(FileSystemEventHandler):
         if not path.lower().endswith(".pdf"):
             return
         if _is_debounced(path):
+            return
+        # Skip files already in quarantine or sanitized output dirs
+        if path.startswith(QUARANTINE_DIR) or path.startswith(SANITIZED_DIR):
             return
         if not os.path.isfile(path):
             return
