@@ -1,105 +1,101 @@
 """
 mcp_servers/endpoint_server/server.py
-
-MCP Server 3: Endpoint Process Telemetry
-Role: Ingests process creation/termination events and answers queries like:
-      "What child processes did AcroRd32.exe spawn in the last 5 minutes?"
-
-In production: connects to Sysmon Event ID 1 logs, EDR API, or osquery.
-In prototype:  accepts POST events + stores in-memory, queryable by parent PID/name.
-
-Input (ingest):  ProcessEvent
-Input (query):   { "parent_name": "AcroRd32.exe", "window_seconds": 300 }
-Output (query):  list[ProcessEvent]
+MCP Server 3: Endpoint Process Telemetry — real MCP SDK (stdio transport)
+Tools: ingest_process_event, query_child_processes, seed_mock_processes
 """
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+import json
 from datetime import datetime, timedelta
-from fastapi import FastAPI
-from pydantic import BaseModel
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent
 from models.schemas import ProcessEvent
 from utils.helpers import is_suspicious_child
 from utils.logger import get_logger
 
 log = get_logger("endpoint_server")
-app = FastAPI(title="Endpoint Telemetry MCP Server")
+server = Server("endpoint-server")
 
-# In-memory event store (replace with DB or Kafka consumer in production)
 _process_events: list[ProcessEvent] = []
 
 
-@app.post("/ingest/process")
-async def ingest_process_event(event: ProcessEvent):
-    """Receive a process event from an agent/sensor."""
-    _process_events.append(event)
-    log.info(f"Process event: {event.parent_name} -> {event.name} (pid={event.pid})")
-    return {"status": "ingested"}
-
-
-class ProcessQuery(BaseModel):
-    parent_name: str = ""
-    parent_pid: int = 0
-    user: str = ""
-    host: str = ""
-    window_seconds: int = 300
-
-
-@app.post("/query/children", response_model=list[ProcessEvent])
-async def query_child_processes(q: ProcessQuery) -> list[ProcessEvent]:
-    """
-    Return child processes matching the query within the time window.
-    Used by the MCP client to find what a PDF reader spawned.
-    """
-    cutoff = datetime.utcnow() - timedelta(seconds=q.window_seconds)
-    results = []
-    for ev in _process_events:
-        if ev.timestamp < cutoff:
-            continue
-        if q.parent_name and q.parent_name.lower() not in ev.parent_name.lower():
-            continue
-        if q.parent_pid and ev.parent_pid != q.parent_pid:
-            continue
-        if q.user and ev.user != q.user:
-            continue
-        if q.host and ev.host != q.host:
-            continue
-        results.append(ev)
-
-    log.info(f"Process query for parent={q.parent_name}: {len(results)} results")
-    return results
-
-
-@app.post("/query/suspicious", response_model=list[ProcessEvent])
-async def query_suspicious_processes(q: ProcessQuery) -> list[ProcessEvent]:
-    """Return only suspicious child processes (powershell, cmd, etc.)."""
-    all_children = await query_child_processes(q)
-    return [ev for ev in all_children if is_suspicious_child(ev.name)]
-
-
-@app.post("/seed/mock")
-async def seed_mock_events():
-    """Seed mock process events for demo/testing."""
-    now = datetime.utcnow()
-    mock = [
-        ProcessEvent(
-            pid=1234, name="AcroRd32.exe", cmdline="AcroRd32.exe invoice_q2.pdf",
-            parent_pid=999, parent_name="explorer.exe",
-            user="jdoe", host="WORKSTATION-01", timestamp=now,
+@server.list_tools()
+async def list_tools() -> list[Tool]:
+    return [
+        Tool(
+            name="ingest_process_event",
+            description="Ingest a process creation event",
+            inputSchema={"type": "object", "properties": {"event": {"type": "object"}}, "required": ["event"]},
         ),
-        ProcessEvent(
-            pid=1235, name="powershell.exe",
-            cmdline="powershell -enc JABjAD0ATgBlAHcALQBPAGIAagBlAGMAdA==",
-            parent_pid=1234, parent_name="AcroRd32.exe",
-            user="jdoe", host="WORKSTATION-01", timestamp=now,
+        Tool(
+            name="query_child_processes",
+            description="Query child processes spawned by a parent within a time window",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "parent_name": {"type": "string", "default": ""},
+                    "user": {"type": "string", "default": ""},
+                    "host": {"type": "string", "default": ""},
+                    "window_seconds": {"type": "integer", "default": 300},
+                },
+            },
         ),
-        ProcessEvent(
-            pid=1236, name="cmd.exe", cmdline="cmd.exe /c copy temp.exe %APPDATA%",
-            parent_pid=1235, parent_name="powershell.exe",
-            user="jdoe", host="WORKSTATION-01", timestamp=now,
+        Tool(
+            name="seed_mock_processes",
+            description="Seed mock process events for demo/testing",
+            inputSchema={"type": "object", "properties": {}},
         ),
     ]
-    _process_events.extend(mock)
-    return {"status": "seeded", "count": len(mock)}
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "server": "endpoint_telemetry", "events_stored": len(_process_events)}
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    if name == "ingest_process_event":
+        ev = ProcessEvent(**arguments["event"])
+        _process_events.append(ev)
+        return [TextContent(type="text", text=json.dumps({"status": "ingested"}))]
+
+    elif name == "query_child_processes":
+        cutoff = datetime.utcnow() - timedelta(seconds=arguments.get("window_seconds", 300))
+        parent = arguments.get("parent_name", "").lower()
+        user = arguments.get("user", "")
+        host = arguments.get("host", "")
+        results = [
+            ev for ev in _process_events
+            if ev.timestamp >= cutoff
+            and (not parent or parent in ev.parent_name.lower())
+            and (not user or ev.user == user)
+            and (not host or ev.host == host)
+        ]
+        return [TextContent(type="text", text=json.dumps([e.model_dump(mode="json") for e in results]))]
+
+    elif name == "seed_mock_processes":
+        now = datetime.utcnow()
+        mock = [
+            ProcessEvent(pid=1234, name="AcroRd32.exe", cmdline="AcroRd32.exe invoice_q2.pdf",
+                         parent_pid=999, parent_name="explorer.exe",
+                         user="jdoe", host="WORKSTATION-01", timestamp=now),
+            ProcessEvent(pid=1235, name="powershell.exe",
+                         cmdline="powershell -enc JABjAD0ATgBlAHcALQBPAGIAagBlAGMAdA==",
+                         parent_pid=1234, parent_name="AcroRd32.exe",
+                         user="jdoe", host="WORKSTATION-01", timestamp=now),
+            ProcessEvent(pid=1236, name="cmd.exe", cmdline="cmd.exe /c copy temp.exe %APPDATA%",
+                         parent_pid=1235, parent_name="powershell.exe",
+                         user="jdoe", host="WORKSTATION-01", timestamp=now),
+        ]
+        _process_events.extend(mock)
+        return [TextContent(type="text", text=json.dumps({"status": "seeded", "count": len(mock)}))]
+
+    raise ValueError(f"Unknown tool: {name}")
+
+
+async def main():
+    async with stdio_server() as (read, write):
+        await server.run(read, write, server.create_initialization_options())
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())

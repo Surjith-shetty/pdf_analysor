@@ -15,15 +15,45 @@ Endpoints:
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-from models.schemas import TriggerEvent, EmailMetadata
+from models.schemas import TriggerEvent
 from models.database import init_db
 from mcp_client.orchestrator import run_pipeline
 from utils.logger import get_logger
-import httpx
-from config.settings import settings
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+import sys, os, json
 from datetime import datetime
 
 log = get_logger("api")
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ALL_SERVERS = {
+    **{
+        k: v for k, v in {
+            "email":       "mcp_servers.email_server.server",
+            "pdf":         "mcp_servers.pdf_server.server",
+            "endpoint":    "mcp_servers.endpoint_server.server",
+            "filesystem":  "mcp_servers.filesystem_server.server",
+            "network":     "mcp_servers.network_server.server",
+            "threatintel": "mcp_servers.threatintel_server.server",
+            "response":    "mcp_servers.response_server.server",
+            "memory":      "mcp_servers.memory_server.server",
+        }.items()
+    }
+}
+
+
+async def _call(server_name: str, tool: str, args: dict) -> dict | list:
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", _ALL_SERVERS[server_name]],
+        env={**os.environ, "PYTHONPATH": _ROOT},
+    )
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(tool, args)
+            return json.loads(result.content[0].text)
 
 
 @asynccontextmanager
@@ -66,65 +96,47 @@ async def analyze(trigger: TriggerEvent):
 
 @app.get("/cases")
 async def list_cases(limit: int = 20):
-    """Proxy to memory server case list."""
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"http://localhost:{settings.memory_server_port}/cases",
-                params={"limit": limit}, timeout=5.0,
-            )
-            return resp.json()
-    except Exception:
-        return {"error": "Memory server unavailable"}
+        return await _call("memory", "list_cases", {"limit": limit})
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/cases/{case_id}")
 async def get_case(case_id: str):
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"http://localhost:{settings.memory_server_port}/cases/{case_id}",
-                timeout=5.0,
-            )
-            return resp.json()
-    except Exception:
-        raise HTTPException(status_code=503, detail="Memory server unavailable")
+        return await _call("memory", "get_case", {"case_id": case_id})
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.post("/cases/{case_id}/verdict")
 async def update_verdict(case_id: str, verdict: str):
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"http://localhost:{settings.memory_server_port}/cases/verdict",
-                json={"case_id": case_id, "verdict": verdict}, timeout=5.0,
-            )
-            return resp.json()
-    except Exception:
-        raise HTTPException(status_code=503, detail="Memory server unavailable")
+        return await _call("memory", "update_verdict", {"case_id": case_id, "verdict": verdict})
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.get("/health")
 async def health():
-    """Check health of all MCP servers."""
-    servers = {
-        "email": settings.email_server_port,
-        "pdf": settings.pdf_server_port,
-        "endpoint": settings.endpoint_server_port,
-        "filesystem": settings.filesystem_server_port,
-        "network": settings.network_server_port,
-        "threatintel": settings.threatintel_server_port,
-        "response": settings.response_server_port,
-        "memory": settings.memory_server_port,
-    }
+    """Probe each MCP server by calling a lightweight tool."""
     status = {}
-    async with httpx.AsyncClient() as client:
-        for name, port in servers.items():
-            try:
-                resp = await client.get(f"http://localhost:{port}/health", timeout=2.0)
-                status[name] = "ok" if resp.status_code == 200 else "error"
-            except Exception:
-                status[name] = "unreachable"
+    for server_name, tool, args in [
+        ("email",      "query_email_metadata", {"attachment_hash": "healthcheck"}),
+        ("pdf",        "analyze_pdf",          {"pdf_path": "/nonexistent"}),
+        ("endpoint",   "query_child_processes",{}),
+        ("filesystem", "query_file_drops",     {}),
+        ("network",    "query_connections",    {}),
+        ("threatintel","enrich_indicators",    {}),
+        ("response",   "execute_action",       {"case_id": "hc", "action": "log_only"}),
+        ("memory",     "list_cases",           {"limit": 1}),
+    ]:
+        try:
+            await _call(server_name, tool, args)
+            status[server_name] = "ok"
+        except Exception:
+            status[server_name] = "unreachable"
 
     all_ok = all(v == "ok" for v in status.values())
     return {

@@ -11,14 +11,11 @@ Decision logic:
   - Policy overrides: never auto-isolate without critical score
   - All actions are logged regardless of mode
 """
-import httpx
 from models.schemas import LLMReasoningOutput, UnifiedContext, ResponseAction
 from config.settings import settings
 from utils.logger import get_logger
 
 log = get_logger("decision_engine")
-
-RESPONSE_URL = f"http://localhost:{settings.response_server_port}"
 
 # Minimum confidence required to trust LLM recommendation
 LLM_CONFIDENCE_THRESHOLD = 0.6
@@ -72,35 +69,17 @@ async def execute_response(
     ctx: UnifiedContext,
 ) -> ResponseAction:
     """
-    Decide and execute the response action via the Response MCP server.
-    Falls back to local simulation if the response server is unreachable.
+    Decide and execute the response action.
+    Called by the orchestrator which routes through the MCP response server.
+    This function is kept for direct use in tests; the pipeline uses execute_response_via_mcp.
     """
     action = _select_action(llm, ctx)
     target = _select_target(action, ctx)
     reason = f"Case {ctx.case_id} | Score={ctx.scores.total_score} | Level={ctx.scores.risk_level} | {llm.explanation[0] if llm.explanation else ''}"
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{RESPONSE_URL}/execute",
-                json={
-                    "case_id": ctx.case_id,
-                    "action": action,
-                    "target": target,
-                    "reason": reason,
-                },
-                timeout=10.0,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return ResponseAction(**data)
-
-    except Exception as e:
-        log.warning(f"Response server unreachable ({e}), simulating locally")
-        return ResponseAction(
-            action=action,
-            target=target or None,
-            reason=reason,
-            simulated=True,
-            result=f"[LOCAL_SIMULATE] {action} on {target or ctx.host}",
-        )
+    return ResponseAction(
+        action=action,
+        target=target or None,
+        reason=reason,
+        simulated=True,
+        result=f"[LOCAL_SIMULATE] {action} on {target or ctx.host}",
+    )

@@ -1,60 +1,31 @@
 """
 mcp_servers/response_server/server.py
-
-MCP Server 7: Response Action Executor
-Supported actions:
-  - log_only          → record the case
-  - alert_analyst     → send notification
-  - kill_process      → terminate a PID
-  - quarantine_file   → move to quarantine + strip execute bits
-  - delete_file       → permanently delete the file
-  - isolate_host      → block network (simulate or EDR)
+MCP Server 7: Response Action Executor — real MCP SDK (stdio transport)
+Tool: execute_action(case_id, action, target, reason) -> ResponseAction JSON
 """
-import os
-import shutil
-import stat
-import signal
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+import shutil, stat, signal
 from datetime import datetime
-from fastapi import FastAPI
-from pydantic import BaseModel
-from config.settings import settings
+from mcp.server import Server
+from mcp.server.stdio import stdio_server
+from mcp.types import Tool, TextContent
 from models.schemas import ResponseAction
+from config.settings import settings
 from utils.logger import get_logger
 
 log = get_logger("response_server")
-app = FastAPI(title="Response Action MCP Server")
+server = Server("response-server")
 
 QUARANTINE_DIR = os.path.expanduser("~/cyber_quarantine")
 os.makedirs(QUARANTINE_DIR, exist_ok=True)
 
 _action_log: list[ResponseAction] = []
-_sanitized_hashes: set[str] = set()
-
-
-@app.post("/sanitized/register")
-async def register_sanitized(payload: dict):
-    """Register a file hash as sanitized so future scans skip flagging it."""
-    h = payload.get("hash", "")
-    if h:
-        _sanitized_hashes.add(h)
-    return {"registered": h}
-
-
-@app.get("/sanitized/check")
-async def check_sanitized(hash: str):
-    return {"sanitized": hash in _sanitized_hashes}
-
-
-class ActionRequest(BaseModel):
-    case_id: str
-    action: str
-    target: str = ""
-    reason: str = ""
 
 
 def _kill_process(pid: int, simulated: bool) -> str:
-    if simulated:
-        return f"[SIMULATED] Would kill PID {pid}"
+    if simulated: return f"[SIMULATED] Would kill PID {pid}"
     try:
         os.kill(pid, signal.SIGKILL)
         return f"Killed PID {pid}"
@@ -63,99 +34,80 @@ def _kill_process(pid: int, simulated: bool) -> str:
 
 
 def _quarantine_file(path: str, simulated: bool) -> str:
-    if simulated:
-        return f"[SIMULATED] Would quarantine {path}"
+    if simulated: return f"[SIMULATED] Would quarantine {path}"
     try:
         dest = os.path.join(QUARANTINE_DIR, os.path.basename(path))
         if os.path.exists(dest):
             base, ext = os.path.splitext(os.path.basename(path))
             dest = os.path.join(QUARANTINE_DIR, f"{base}_{int(datetime.utcnow().timestamp())}{ext}")
         shutil.move(path, dest)
-        os.chmod(dest, stat.S_IRUSR | stat.S_IWUSR)  # strip execute bits
+        os.chmod(dest, stat.S_IRUSR | stat.S_IWUSR)
         return f"Quarantined {path} → {dest}"
     except Exception as e:
         return f"Failed to quarantine {path}: {e}"
 
 
-def _delete_file(path: str, simulated: bool) -> str:
-    if simulated:
-        return f"[SIMULATED] Would permanently delete {path}"
-    try:
-        if os.path.isfile(path):
-            os.remove(path)
-        elif os.path.isdir(path):
-            shutil.rmtree(path)
-        else:
-            return f"Path not found: {path}"
-        return f"Permanently deleted {path}"
-    except Exception as e:
-        return f"Failed to delete {path}: {e}"
-
-
 def _isolate_host(host: str, simulated: bool) -> str:
-    if simulated:
-        return f"[SIMULATED] Would isolate host {host} (block all outbound)"
+    if simulated: return f"[SIMULATED] Would isolate host {host}"
     return f"[ENFORCE] Host isolation for {host} — integrate with EDR API"
 
 
-def _alert_analyst(case_id: str, reason: str) -> str:
-    log.warning(f"🚨 ANALYST ALERT | Case: {case_id} | {reason}")
-    return f"Alert sent for case {case_id}"
+@server.list_tools()
+async def list_tools() -> list[Tool]:
+    return [Tool(
+        name="execute_action",
+        description="Execute a response action (log_only, alert_analyst, kill_process, quarantine_file, isolate_host)",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "case_id": {"type": "string"},
+                "action": {"type": "string"},
+                "target": {"type": "string", "default": ""},
+                "reason": {"type": "string", "default": ""},
+            },
+            "required": ["case_id", "action"],
+        },
+    )]
 
 
-@app.post("/execute", response_model=ResponseAction)
-async def execute_action(req: ActionRequest) -> ResponseAction:
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    if name != "execute_action":
+        raise ValueError(f"Unknown tool: {name}")
+
     simulated = settings.response_mode == "simulate"
-    result = "unknown"
+    action = arguments["action"]
+    case_id = arguments["case_id"]
+    target = arguments.get("target", "")
+    reason = arguments.get("reason", "")
 
-    if req.action == "log_only":
-        result = f"Case {req.case_id} logged"
-        log.info(f"[LOG_ONLY] {result}")
-
-    elif req.action == "alert_analyst":
-        result = _alert_analyst(req.case_id, req.reason)
-
-    elif req.action == "kill_process":
-        try:
-            pid = int(req.target)
-        except ValueError:
-            pid = 0
-        result = _kill_process(pid, simulated)
-        log.warning(f"[KILL_PROCESS] {result}")
-
-    elif req.action == "quarantine_file":
-        result = _quarantine_file(req.target, simulated)
-        log.warning(f"[QUARANTINE] {result}")
-
-    elif req.action == "delete_file":
-        result = _delete_file(req.target, simulated)
-        log.warning(f"[DELETE_FILE] {result}")
-
-    elif req.action == "isolate_host":
-        result = _isolate_host(req.target, simulated)
-        log.critical(f"[ISOLATE_HOST] {result}")
-
+    if action == "log_only":
+        result = f"Case {case_id} logged"
+    elif action == "alert_analyst":
+        log.warning(f"🚨 ANALYST ALERT | Case: {case_id} | {reason}")
+        result = f"Alert sent for case {case_id}"
+    elif action == "kill_process":
+        result = _kill_process(int(target) if target.isdigit() else 0, simulated)
+    elif action == "quarantine_file":
+        result = _quarantine_file(target, simulated)
+    elif action == "isolate_host":
+        result = _isolate_host(target, simulated)
     else:
-        result = f"Unknown action: {req.action}"
-        log.error(result)
+        result = f"Unknown action: {action}"
 
-    action = ResponseAction(
-        action=req.action,
-        target=req.target or None,
-        reason=req.reason,
-        simulated=simulated,
-        executed_at=datetime.utcnow(),
-        result=result,
+    response = ResponseAction(
+        action=action, target=target or None, reason=reason,
+        simulated=simulated, executed_at=datetime.utcnow(), result=result,
     )
-    _action_log.append(action)
-    return action
+    _action_log.append(response)
+    return [TextContent(type="text", text=response.model_dump_json())]
 
 
-@app.get("/log", response_model=list[ResponseAction])
-async def get_action_log():
-    return _action_log
+async def main():
+    async with stdio_server() as (read, write):
+        await server.run(read, write, server.create_initialization_options())
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "server": "response_action", "mode": settings.response_mode}
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())

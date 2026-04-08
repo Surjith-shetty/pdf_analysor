@@ -34,19 +34,11 @@ RESPONSE_SERVER = f"http://localhost:8007"
 
 
 def _is_sanitized(pdf_hash: str) -> bool:
-    """Check with response server if this hash was already sanitized."""
-    try:
-        r = httpx.get(f"{RESPONSE_SERVER}/sanitized/check", params={"hash": pdf_hash}, timeout=3.0)
-        return r.json().get("sanitized", False)
-    except Exception:
-        return False
+    return False  # MCP servers are stateless per-call; skip sanitized check
 
 
 def _register_sanitized(pdf_hash: str):
-    try:
-        httpx.post(f"{RESPONSE_SERVER}/sanitized/register", json={"hash": pdf_hash}, timeout=3.0)
-    except Exception:
-        pass
+    pass  # no-op in MCP mode
 
 ORCHESTRATOR = "http://localhost:8000"
 QUARANTINE_DIR = os.path.expanduser("~/cyber_quarantine")
@@ -555,7 +547,7 @@ def start_servers():
 def wait_for_orchestrator(retries: int = 10, delay: float = 2.0) -> bool:
     for i in range(retries):
         try:
-            r = httpx.get(f"{ORCHESTRATOR}/health", timeout=2.0)
+            r = httpx.get(f"{ORCHESTRATOR}/docs", timeout=3.0)
             if r.status_code == 200:
                 return True
         except Exception:
