@@ -35,6 +35,21 @@ def _score_source(ctx: UnifiedContext) -> tuple[int, list[str]]:
     score = 0
     reasons = []
 
+    if ctx.pdf.origin == "whatsapp_preview":
+        score += 15
+        reasons.append("PDF received via WhatsApp preview — no email headers, sender unverified (+15)")
+        if ctx.whatsapp:
+            if ctx.whatsapp.chat_type == "group":
+                score += 5
+                reasons.append("WhatsApp group chat origin — high exposure surface (+5)")
+            if ctx.whatsapp.preview_only:
+                score += 5
+                reasons.append("File was never explicitly saved — ephemeral cache copy (+5)")
+            if not ctx.whatsapp.sender_jid:
+                score += 3
+                reasons.append("WhatsApp sender JID unknown — cannot attribute source (+3)")
+        return min(score, 30), reasons
+
     if ctx.pdf.origin == "external_email":
         score += 10
         reasons.append("PDF arrived via external email (+10)")

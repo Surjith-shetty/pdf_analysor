@@ -48,6 +48,15 @@ os.makedirs(SANITIZED_DIR, exist_ok=True)
 
 PDF_READER_NAMES = {"preview", "acrobat", "acrord32", "adobe acrobat", "foxit", "skim", "pdf viewer"}
 
+WHATSAPP_CACHE_FOLDERS = [
+    # WhatsApp Desktop (Mac App Store) — actual PDF preview location
+    str(Path.home() / "Library" / "Containers" / "net.whatsapp.WhatsApp" / "Data" / "tmp" / "documents"),
+    str(Path.home() / "Library" / "Containers" / "net.whatsapp.WhatsApp" / "Data" / "tmp"),
+    str(Path.home() / "Library" / "Containers" / "net.whatsapp.WhatsApp" / "Data" / "Library" / "Caches"),
+    # WhatsApp Desktop (direct download fallback)
+    str(Path.home() / "Library" / "Application Support" / "WhatsApp"),
+]
+
 SYSTEM_WATCH_FOLDERS = [
     str(Path.home() / "Downloads"),
     str(Path.home() / "Desktop"),
@@ -55,6 +64,7 @@ SYSTEM_WATCH_FOLDERS = [
     str(Path.home() / "Library" / "Mail Downloads"),
     "/tmp",
     "/var/tmp",
+    *[f for f in WHATSAPP_CACHE_FOLDERS if os.path.exists(f)],
 ]
 
 if len(sys.argv) > 1 and not sys.argv[1].startswith("--"):
@@ -383,12 +393,13 @@ async def _analyze(pdf_path: str):
     console.print(f"\n[bold cyan]PDF detected:[/bold cyan] {pdf_name}")
     console.print(f"  SHA256: [dim]{pdf_hash[:16]}...[/dim]")
 
+    is_whatsapp = any(pdf_path.startswith(f) for f in WHATSAPP_CACHE_FOLDERS)
     trigger = {
         "pdf_path": pdf_path,
         "pdf_hash": pdf_hash,
         "user": os.environ.get("USER", "unknown"),
         "host": os.uname().nodename,
-        "origin": "local_open",
+        "origin": "whatsapp_preview" if is_whatsapp else "local_open",
     }
 
     try:
@@ -433,6 +444,12 @@ async def _analyze(pdf_path: str):
     killed = _terminate_attack_chain(result, pdf_path)
     for k in killed:
         console.print(f"  [red]✗ {k}[/red]")
+
+    # Step 2: check if file still exists (WhatsApp cache files are ephemeral)
+    if not os.path.isfile(pdf_path):
+        console.print("  [yellow]⚠ File no longer on disk (WhatsApp cache auto-cleared) — threat logged only.[/yellow]")
+        notify_threat_action(pdf_name, "cache_cleared", f"Risk: {risk.upper()} | Score: {score} | File was ephemeral")
+        return
 
     # Step 2: ask user what to do with the file
     attack_summary = _build_attack_summary(result)

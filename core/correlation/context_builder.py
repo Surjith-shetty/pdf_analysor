@@ -12,7 +12,7 @@ from mcp.client.stdio import stdio_client
 from models.schemas import (
     TriggerEvent, UnifiedContext, PDFContext, RuntimeContext,
     EmailMetadata, PDFAnalysisResult, ProcessEvent, FileEvent,
-    NetworkEvent, ThreatIntelResult,
+    NetworkEvent, ThreatIntelResult, WhatsAppMetadata,
 )
 from core.baseline.engine import compute_baseline
 from utils.logger import get_logger
@@ -28,6 +28,7 @@ SERVER_MODULES = {
     "filesystem":  "mcp_servers.filesystem_server.server",
     "network":     "mcp_servers.network_server.server",
     "threatintel": "mcp_servers.threatintel_server.server",
+    "whatsapp":    "mcp_servers.whatsapp_server.server",
 }
 
 
@@ -52,6 +53,12 @@ async def build_context(trigger: TriggerEvent) -> UnifiedContext:
         email_data = await _call("email", "query_email_metadata",
                                  {"attachment_hash": trigger.pdf_hash, "sender": ""})
         email = EmailMetadata(**email_data) if email_data else None
+
+    # 1b. WhatsApp metadata — only when origin is whatsapp_preview
+    whatsapp_meta = None
+    if trigger.origin == "whatsapp_preview":
+        wa_data = await _call("whatsapp", "detect_whatsapp_source", {"pdf_path": trigger.pdf_path})
+        whatsapp_meta = WhatsAppMetadata(**wa_data) if wa_data else WhatsAppMetadata(confidence=0.5)
 
     # 2. PDF analysis
     pdf_data = await _call("pdf", "analyze_pdf",
@@ -125,6 +132,7 @@ async def build_context(trigger: TriggerEvent) -> UnifiedContext:
     ctx = UnifiedContext(
         user=trigger.user, host=trigger.host,
         pdf=pdf_ctx, runtime=runtime, baseline=baseline, intel=intel,
+        whatsapp=whatsapp_meta,
     )
     log.info(f"Context built for case {ctx.case_id}: "
              f"children={len(child_proc_names)}, drops={len(dropped_files)}, "

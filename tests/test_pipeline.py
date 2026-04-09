@@ -6,10 +6,12 @@ Tests run without any external services (no MCP servers needed).
 Uses mock data to validate scoring, graph building, and baseline logic.
 """
 import pytest
+import os
 from datetime import datetime
 from models.schemas import (
     UnifiedContext, PDFContext, RuntimeContext, BaselineResult,
     ThreatIntelResult, ScoreBreakdown, TriggerEvent, AttackGraph,
+    WhatsAppMetadata,
 )
 from core.scoring.engine import compute_risk_score
 from core.graph.builder import build_attack_graph, graph_to_summary
@@ -220,3 +222,85 @@ def test_trigger_event_creation():
     )
     assert trigger.event_id != ""
     assert trigger.user == "testuser"
+
+
+# ── WhatsApp Detection Tests ─────────────────────────────────────────────────────
+
+WA_CACHE_PATH = os.path.expanduser(
+    "~/Library/Containers/net.whatsapp.WhatsApp/Data/Library/Caches/DOC-20240601-WA0003.pdf"
+)
+
+
+def make_whatsapp_context(chat_type: str = "individual", sender_jid: str = None) -> UnifiedContext:
+    return UnifiedContext(
+        user="jdoe",
+        host="MACBOOK-01",
+        pdf=PDFContext(
+            hash="wa1234abcd",
+            path=WA_CACHE_PATH,
+            origin="whatsapp_preview",
+            sender="",
+            sender_reputation="unknown",
+            embedded_js=False,
+            open_action=False,
+        ),
+        runtime=RuntimeContext(),
+        baseline=BaselineResult(),
+        intel=ThreatIntelResult(),
+        whatsapp=WhatsAppMetadata(
+            app_name="WhatsApp",
+            sender_jid=sender_jid,
+            chat_type=chat_type,
+            preview_only=True,
+            confidence=0.9,
+        ),
+    )
+
+
+def test_whatsapp_origin_scores_source_correctly():
+    """whatsapp_preview origin should score 15 base + extras, capped at 30."""
+    ctx = make_whatsapp_context(chat_type="individual", sender_jid="919876543210@s.whatsapp.net")
+    breakdown, reasons = compute_risk_score(ctx)
+    assert breakdown.source_score >= 15
+    assert breakdown.source_score <= 30
+    assert any("WhatsApp" in r for r in reasons)
+
+
+def test_whatsapp_group_chat_adds_score():
+    """Group chat should add +5 on top of base +15."""
+    ctx_individual = make_whatsapp_context(chat_type="individual", sender_jid="123@s.whatsapp.net")
+    ctx_group = make_whatsapp_context(chat_type="group", sender_jid="123@s.whatsapp.net")
+    score_individual, _ = compute_risk_score(ctx_individual)
+    score_group, _ = compute_risk_score(ctx_group)
+    assert score_group.source_score > score_individual.source_score
+
+
+def test_whatsapp_unknown_sender_adds_score():
+    """Unknown sender JID should add +3."""
+    ctx_known = make_whatsapp_context(sender_jid="919876543210@s.whatsapp.net")
+    ctx_unknown = make_whatsapp_context(sender_jid=None)
+    score_known, _ = compute_risk_score(ctx_known)
+    score_unknown, _ = compute_risk_score(ctx_unknown)
+    assert score_unknown.source_score > score_known.source_score
+
+
+def test_whatsapp_does_not_affect_email_scoring():
+    """Existing email-origin scoring must be unchanged."""
+    ctx = make_malicious_context()  # origin=external_email, no whatsapp field
+    breakdown, reasons = compute_risk_score(ctx)
+    assert breakdown.source_score > 0
+    assert not any("WhatsApp" in r for r in reasons)
+
+
+def test_whatsapp_context_serialization():
+    """UnifiedContext with WhatsAppMetadata must serialize cleanly."""
+    ctx = make_whatsapp_context()
+    data = ctx.model_dump()
+    assert data["whatsapp"]["app_name"] == "WhatsApp"
+    assert data["whatsapp"]["preview_only"] is True
+
+
+def test_non_whatsapp_context_has_no_whatsapp_field():
+    """Normal contexts must have whatsapp=None."""
+    ctx = make_benign_context()
+    assert ctx.whatsapp is None

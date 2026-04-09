@@ -53,6 +53,18 @@ def _build_user_prompt(
     graph_summary: dict,
 ) -> str:
     """Build the structured context prompt sent to the LLM."""
+    wa_block = ""
+    if ctx.whatsapp and ctx.pdf.origin == "whatsapp_preview":
+        wa_block = f"""
+WHATSAPP SOURCE:
+- App: {ctx.whatsapp.app_name}
+- Chat Type: {ctx.whatsapp.chat_type}
+- Sender JID: {ctx.whatsapp.sender_jid or 'unknown'}
+- Group: {ctx.whatsapp.group_name or 'n/a'}
+- Preview Only (not saved): {ctx.whatsapp.preview_only}
+- Detection Confidence: {ctx.whatsapp.confidence}
+"""
+
     return f"""Analyze this security context and provide your verdict:
 
 CASE ID: {ctx.case_id}
@@ -67,7 +79,7 @@ PDF CONTEXT:
 - Embedded Files: {ctx.pdf.embedded_files}
 - Obfuscation Score: {ctx.pdf.obfuscation_score}
 - Suspicious Keywords: {', '.join(ctx.pdf.suspicious_keywords) or 'none'}
-
+{wa_block}
 RUNTIME BEHAVIOR:
 - PDF Reader: {ctx.runtime.reader_process or 'unknown'}
 - Child Processes Spawned: {', '.join(ctx.runtime.child_processes) or 'none'}

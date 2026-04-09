@@ -38,6 +38,7 @@ _ALL_SERVERS = {
             "threatintel": "mcp_servers.threatintel_server.server",
             "response":    "mcp_servers.response_server.server",
             "memory":      "mcp_servers.memory_server.server",
+            "whatsapp":    "mcp_servers.whatsapp_server.server",
         }.items()
     }
 }
@@ -94,6 +95,23 @@ async def analyze(trigger: TriggerEvent):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/cases/whatsapp")
+async def list_whatsapp_cases(limit: int = 20):
+    """Return all cases where the PDF originated from a WhatsApp preview."""
+    try:
+        all_cases = await _call("memory", "list_cases", {"limit": limit * 5})
+        if not isinstance(all_cases, list):
+            return all_cases
+        wa_cases = [
+            c for c in all_cases
+            if isinstance(c, dict) and
+            json.loads(c.get("context_json", "{}")).get("pdf", {}).get("origin") == "whatsapp_preview"
+        ]
+        return wa_cases[:limit]
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/cases")
 async def list_cases(limit: int = 20):
     try:
@@ -131,6 +149,7 @@ async def health():
         ("threatintel","enrich_indicators",    {}),
         ("response",   "execute_action",       {"case_id": "hc", "action": "log_only"}),
         ("memory",     "list_cases",           {"limit": 1}),
+        ("whatsapp",   "detect_whatsapp_source", {"pdf_path": "/nonexistent"}),
     ]:
         try:
             await _call(server_name, tool, args)

@@ -89,6 +89,15 @@ class ThreatIntelResult(BaseModel):
     source: str = "mock"
 
 
+class WhatsAppMetadata(BaseModel):
+    app_name: str = "WhatsApp"
+    sender_jid: Optional[str] = None       # e.g. 919876543210@s.whatsapp.net
+    group_name: Optional[str] = None
+    chat_type: str = "unknown"             # individual | group | unknown
+    preview_only: bool = True              # True = viewed but not saved by user
+    confidence: float = 0.0               # 0.0–1.0 how sure we are it's from WA
+
+
 class BaselineResult(BaseModel):
     user_usually_runs_powershell: bool = False
     user_usually_runs_cmd: bool = False
@@ -144,6 +153,7 @@ class UnifiedContext(BaseModel):
     baseline: BaselineResult = Field(default_factory=BaselineResult)
     intel: ThreatIntelResult = Field(default_factory=ThreatIntelResult)
     scores: ScoreBreakdown = Field(default_factory=ScoreBreakdown)
+    whatsapp: Optional[WhatsAppMetadata] = None
 
 
 # ─── LLM Reasoning Output ─────────────────────────────────────────────────────
