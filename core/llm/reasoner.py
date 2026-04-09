@@ -155,14 +155,10 @@ async def reason_over_context(
     prompt = _build_user_prompt(ctx, score_reasons, graph_summary)
 
     try:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-        )
-
+        from groq import AsyncGroq
         if settings.llm_api_key in ("sk-placeholder", "your_openai_api_key_here", ""):
             raise ValueError("LLM API key not configured")
+        client = AsyncGroq(api_key=settings.llm_api_key)
 
         response = await client.chat.completions.create(
             model=settings.llm_model,

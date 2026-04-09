@@ -78,6 +78,13 @@ def _score_pdf(ctx: UnifiedContext) -> tuple[int, list[str]]:
         score += 5
         reasons.append(f"Moderate obfuscation score {pdf.obfuscation_score:.2f} (+5)")
 
+    if pdf.entropy > 7.0:
+        score += 10
+        reasons.append(f"Very high entropy {pdf.entropy:.2f} — likely encrypted/packed (+10)")
+    elif pdf.entropy > 6.0:
+        score += 5
+        reasons.append(f"High entropy {pdf.entropy:.2f} — possible obfuscation (+5)")
+
     return min(score, 50), reasons
 
 
@@ -136,7 +143,7 @@ def _score_anomaly(ctx: UnifiedContext) -> tuple[int, list[str]]:
         score += 10
         reasons.append(f"Moderate user behavioral anomaly ({bl.user_anomaly_score:.2f}) (+10)")
 
-    if bl.pdf_reader_spawning_scripts_rarity > 0.9:
+    if bl.pdf_reader_spawning_scripts_rarity > 0.9 and ctx.runtime.child_processes:
         score += 15
         reasons.append(f"PDF reader spawning scripts is extremely rare for this user (+15)")
 

@@ -110,6 +110,7 @@ class PDFContext(BaseModel):
     open_action: bool = False
     embedded_files: int = 0
     obfuscation_score: float = 0.0
+    entropy: float = 0.0
     suspicious_keywords: list[str] = Field(default_factory=list)
 
 

@@ -45,10 +45,13 @@ async def _call(server_name: str, tool: str, args: dict) -> dict | list:
 
 
 async def build_context(trigger: TriggerEvent) -> UnifiedContext:
-    # 1. Email metadata
-    email_data = await _call("email", "query_email_metadata",
-                             {"attachment_hash": trigger.pdf_hash, "sender": ""})
-    email = EmailMetadata(**email_data) if email_data else None
+    # 1. Email metadata — use real data from trigger if provided, else mock lookup
+    if trigger.email_metadata:
+        email = trigger.email_metadata
+    else:
+        email_data = await _call("email", "query_email_metadata",
+                                 {"attachment_hash": trigger.pdf_hash, "sender": ""})
+        email = EmailMetadata(**email_data) if email_data else None
 
     # 2. PDF analysis
     pdf_data = await _call("pdf", "analyze_pdf",
@@ -113,6 +116,7 @@ async def build_context(trigger: TriggerEvent) -> UnifiedContext:
         open_action=pdf_analysis.has_open_action if pdf_analysis else False,
         embedded_files=pdf_analysis.has_embedded_files if pdf_analysis else 0,
         obfuscation_score=pdf_analysis.obfuscation_score if pdf_analysis else 0.0,
+        entropy=pdf_analysis.entropy if pdf_analysis else 0.0,
         suspicious_keywords=pdf_analysis.suspicious_keywords if pdf_analysis else [],
     )
 
